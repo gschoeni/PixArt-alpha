@@ -22,7 +22,7 @@ import random
 import shutil
 from pathlib import Path
 from typing import List, Union
-
+from PIL import Image
 import datasets
 import numpy as np
 import torch
@@ -411,7 +411,14 @@ def parse_args():
         default=4,
         help=("The dimension of the LoRA update matrices."),
     )
-
+    parser.add_argument(
+        "--trigger_prompt",
+        type=str,
+        default="",
+        help=(
+            "A prompt that will be prepended to the training prompts."
+        ),
+    )
     parser.add_argument("--local-rank", type=int, default=-1)
 
     args = parser.parse_args()
@@ -503,8 +510,8 @@ def main():
     transformer = Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="transformer", torch_dtype=weight_dtype)
 
     # freeze parameters of models to save more memory
-    transformer.requires_grad_(False)    
-    
+    transformer.requires_grad_(False)
+
     # Freeze the transformer parameters before adding adapters
     for param in transformer.parameters():
         param.requires_grad_(False)
@@ -533,7 +540,7 @@ def main():
 
     # Move transformer, vae and text_encoder to device and cast to weight_dtype
     transformer.to(accelerator.device)
-    
+
     def cast_training_params(model: Union[torch.nn.Module, List[torch.nn.Module]], dtype=torch.float32):
         if not isinstance(model, list):
             model = [model]
@@ -564,7 +571,8 @@ def main():
 
                 for _, model in enumerate(models):
                     # make sure to pop weight so that corresponding model is not saved again
-                    weights.pop()
+                    if len(weights) > 0:
+                        weights.pop()
 
         def load_model_hook(models, input_dir):
             # load the LoRA into the model
@@ -631,10 +639,11 @@ def main():
     if args.dataset_name is not None:
         # Downloading and loading a dataset from the hub.
         dataset = load_dataset(
-            args.dataset_name,
-            args.dataset_config_name,
+            "parquet",
+            data_files=args.dataset_config_name,
+            # args.dataset_config_name,
             cache_dir=args.cache_dir,
-            data_dir=args.train_data_dir,
+            # data_dir=args.train_data_dir,
         )
     else:
         data_files = {}
@@ -676,6 +685,10 @@ def main():
     def tokenize_captions(examples, is_train=True, proportion_empty_prompts=0., max_length=120):
         captions = []
         for caption in examples[caption_column]:
+            # Prepend the trigger prompt to the caption if it is set
+            if args.trigger_prompt:
+                caption = f"{args.trigger_prompt} {caption}"
+            # Add an empty string to the beginning of the list if it's empty
             if random.random() < proportion_empty_prompts:
                 captions.append("")
             elif isinstance(caption, str):
@@ -702,7 +715,8 @@ def main():
     )
 
     def preprocess_train(examples):
-        images = [image.convert("RGB") for image in examples[image_column]]
+        image_paths = [os.path.join(args.dataset_name, image_path) for image_path in examples[image_column]]
+        images = [Image.open(path).convert("RGB") for path in image_paths]
         examples["pixel_values"] = [train_transforms(image) for image in images]
         examples["input_ids"], examples['prompt_attention_mask'] = tokenize_captions(examples, proportion_empty_prompts=args.proportion_empty_prompts, max_length=max_length)
         return examples
@@ -937,105 +951,105 @@ def main():
             if global_step >= args.max_train_steps:
                 break
 
-        if accelerator.is_main_process:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
-                logger.info(
-                    f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
-                    f" {args.validation_prompt}."
-                )
-                # create pipeline
-                pipeline = DiffusionPipeline.from_pretrained(
-                    args.pretrained_model_name_or_path,
-                    transformer=accelerator.unwrap_model(transformer, keep_fp32_wrapper=False),
-                    text_encoder=text_encoder, vae=vae,
-                    torch_dtype=weight_dtype,
-                )
-                pipeline = pipeline.to(accelerator.device)
-                pipeline.set_progress_bar_config(disable=True)
+        # if accelerator.is_main_process:
+        #     if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
+        #         logger.info(
+        #             f"Running validation... \n Generating {args.num_validation_images} images with prompt:"
+        #             f" {args.validation_prompt}."
+        #         )
+        #         # create pipeline
+        #         pipeline = DiffusionPipeline.from_pretrained(
+        #             args.pretrained_model_name_or_path,
+        #             transformer=accelerator.unwrap_model(transformer, keep_fp32_wrapper=False),
+        #             text_encoder=text_encoder, vae=vae,
+        #             torch_dtype=weight_dtype,
+        #         )
+        #         pipeline = pipeline.to(accelerator.device)
+        #         pipeline.set_progress_bar_config(disable=True)
 
-                # run inference
-                generator = torch.Generator(device=accelerator.device)
-                if args.seed is not None:
-                    generator = generator.manual_seed(args.seed)
-                images = []
-                for _ in range(args.num_validation_images):
-                    images.append(pipeline(args.validation_prompt, num_inference_steps=20, generator=generator).images[0])
+        #         # run inference
+        #         generator = torch.Generator(device=accelerator.device)
+        #         if args.seed is not None:
+        #             generator = generator.manual_seed(args.seed)
+        #         images = []
+        #         for _ in range(args.num_validation_images):
+        #             images.append(pipeline(args.validation_prompt, num_inference_steps=20, generator=generator).images[0])
 
-                for tracker in accelerator.trackers:
-                    if tracker.name == "tensorboard":
-                        np_images = np.stack([np.asarray(img) for img in images])
-                        tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
-                    if tracker.name == "wandb":
-                        tracker.log(
-                            {
-                                "validation": [wandb.Image(image, caption=f"{i}: {args.validation_prompt}") for i, image in enumerate(images)]
-                            }
-                        )
+        #         for tracker in accelerator.trackers:
+        #             if tracker.name == "tensorboard":
+        #                 np_images = np.stack([np.asarray(img) for img in images])
+        #                 tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
+        #             if tracker.name == "wandb":
+        #                 tracker.log(
+        #                     {
+        #                         "validation": [wandb.Image(image, caption=f"{i}: {args.validation_prompt}") for i, image in enumerate(images)]
+        #                     }
+        #                 )
 
-                del pipeline
-                torch.cuda.empty_cache()
+        #         del pipeline
+        #         torch.cuda.empty_cache()
 
     # Save the lora layers
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
-        transformer.save_pretrained(args.output_dir)
-        lora_state_dict = get_peft_model_state_dict(transformer)
-        StableDiffusionPipeline.save_lora_weights(os.path.join(args.output_dir, "transformer_lora"), lora_state_dict)
+    # accelerator.wait_for_everyone()
+    # if accelerator.is_main_process:
+    #     transformer = accelerator.unwrap_model(transformer, keep_fp32_wrapper=False)
+    #     transformer.save_pretrained(args.output_dir)
+    #     lora_state_dict = get_peft_model_state_dict(transformer)
+    #     StableDiffusionPipeline.save_lora_weights(os.path.join(args.output_dir, "transformer_lora"), lora_state_dict)
 
-        if args.push_to_hub:
-            save_model_card(
-                repo_id,
-                images=images,
-                base_model=args.pretrained_model_name_or_path,
-                dataset_name=args.dataset_name,
-                repo_folder=args.output_dir,
-            )
-            upload_folder(
-                repo_id=repo_id,
-                folder_path=args.output_dir,
-                commit_message="End of training",
-                ignore_patterns=["step_*", "epoch_*"],
-            )
+    #     if args.push_to_hub:
+    #         save_model_card(
+    #             repo_id,
+    #             images=images,
+    #             base_model=args.pretrained_model_name_or_path,
+    #             dataset_name=args.dataset_name,
+    #             repo_folder=args.output_dir,
+    #         )
+    #         upload_folder(
+    #             repo_id=repo_id,
+    #             folder_path=args.output_dir,
+    #             commit_message="End of training",
+    #             ignore_patterns=["step_*", "epoch_*"],
+    #         )
 
-    
-    # Final inference
-    # Load previous transformer
-    transformer = Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder='transformer', torch_dtype=weight_dtype)
-    # load lora weight
-    transformer = PeftModel.from_pretrained(transformer, args.output_dir)
-    # Load previous pipeline
-    pipeline = DiffusionPipeline.from_pretrained(args.pretrained_model_name_or_path, transformer=transformer, text_encoder=text_encoder, vae=vae, torch_dtype=weight_dtype,)
-    pipeline = pipeline.to(accelerator.device)
 
-    del transformer
-    torch.cuda.empty_cache()
+    # # Final inference
+    # # Load previous transformer
+    # transformer = Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder='transformer', torch_dtype=weight_dtype)
+    # # load lora weight
+    # transformer = PeftModel.from_pretrained(transformer, args.output_dir)
+    # # Load previous pipeline
+    # pipeline = DiffusionPipeline.from_pretrained(args.pretrained_model_name_or_path, transformer=transformer, text_encoder=text_encoder, vae=vae, torch_dtype=weight_dtype,)
+    # pipeline = pipeline.to(accelerator.device)
 
-    # run inference
-    generator = torch.Generator(device=accelerator.device)
-    if args.seed is not None:
-        generator = generator.manual_seed(args.seed)
-    images = []
-    for _ in range(args.num_validation_images):
-        images.append(pipeline(args.validation_prompt, num_inference_steps=20, generator=generator).images[0])
+    # del transformer
+    # torch.cuda.empty_cache()
 
-    if accelerator.is_main_process:
-        for tracker in accelerator.trackers:
-            if len(images) != 0:
-                if tracker.name == "tensorboard":
-                    np_images = np.stack([np.asarray(img) for img in images])
-                    tracker.writer.add_images("test", np_images, epoch, dataformats="NHWC")
-                if tracker.name == "wandb":
-                    tracker.log(
-                        {
-                            "test": [
-                                wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
-                                for i, image in enumerate(images)
-                            ]
-                        }
-                    )
+    # # run inference
+    # generator = torch.Generator(device=accelerator.device)
+    # if args.seed is not None:
+    #     generator = generator.manual_seed(args.seed)
+    # images = []
+    # for _ in range(args.num_validation_images):
+    #     images.append(pipeline(args.validation_prompt, num_inference_steps=20, generator=generator).images[0])
 
-    accelerator.end_training()
+    # if accelerator.is_main_process:
+    #     for tracker in accelerator.trackers:
+    #         if len(images) != 0:
+    #             if tracker.name == "tensorboard":
+    #                 np_images = np.stack([np.asarray(img) for img in images])
+    #                 tracker.writer.add_images("test", np_images, epoch, dataformats="NHWC")
+    #             if tracker.name == "wandb":
+    #                 tracker.log(
+    #                     {
+    #                         "test": [
+    #                             wandb.Image(image, caption=f"{i}: {args.validation_prompt}")
+    #                             for i, image in enumerate(images)
+    #                         ]
+    #                     }
+    #                 )
+
+    # accelerator.end_training()
 
 
 if __name__ == "__main__":
