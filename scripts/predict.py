@@ -9,6 +9,7 @@ import sys
 import argparse
 # import oxen
 import time
+import pandas as pd
 
 MODEL_ID = "PixArt-alpha/PixArt-XL-2-512x512"
 
@@ -33,9 +34,9 @@ def get_lora_pipeline(path):
     return pipe
 
 def generate_image(pipe, prompt, i, current_time, prefix, output_dir):
-    image = pipe(prompt, num_inference_steps=50).images[0]
+    image = pipe(prompt, num_inference_steps=20).images[0]
 
-    image_base_dir = "results"
+    image_base_dir = "generated"
     full_image_dir = os.path.join(output_dir, image_base_dir)
 
     if not os.path.exists(full_image_dir):
@@ -116,6 +117,23 @@ if __name__ == "__main__":
 
     json_trigger = generate_image(default_pipe, prompt, i, current_time, prefix, output_path)
     print(json_trigger)
+
+    # Write a loop that iterates over a parquet file named 'test.parquet' and generates images for each row
+    # df = pd.read_parquet(os.path.join(output_path, 'test.parquet'))
+    # df['image'] = None
+    # for index, row in df.iterrows():
+    #     print("Processing row:", index)
+    #     prompt = row['prompt']
+    #     i = index
+    #     current_time = time.time()
+    #     prefix = ""
+    #     json_trigger = generate_image(default_pipe, prompt, i, current_time, prefix, output_path)
+    #     print(json_trigger)
+    #     df.loc[index, 'image'] = json_trigger['file_name']
+
+    # df.to_parquet(os.path.join(output_path, 'test.parquet'))
+
+
 
     # output_path = args.repo
     # num_results = args.num_results

@@ -104,7 +104,7 @@ def main():
     seed = 42
     resolution = 512
     train_batch_size = 8
-    num_train_epochs = 20
+    num_train_epochs = 100
     gradient_accumulation_steps = 1
     learning_rate = 3e-04
     lr_scheduler = "cosine"
@@ -117,7 +117,7 @@ def main():
     max_grad_norm = 1.0
     proportion_empty_prompts = 0
     logging_dir = "logs"
-    checkpointing_steps = 100
+    checkpointing_steps = 500
     checkpoints_total_limit = 5
     rank = 16
     trigger_prompt = ""
